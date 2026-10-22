@@ -1,5 +1,8 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from pathlib import Path
+
 from app import analyze_sentiment
 from database import initialize_database, save_analysis, get_analyses
 
@@ -77,3 +80,10 @@ def analyze_batch(request: BatchReviewRequest):
 @app.get("/analyses")
 def get_saved_analyses():
     return {"analyses": get_analyses()}
+
+
+app.mount(
+    "/",
+    StaticFiles(directory=Path(__file__).with_name("static"), html=True),
+    name="frontend",
+)

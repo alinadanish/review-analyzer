@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Analyze customer reviews and view saved sentiment results."
+    />
+    <meta name="theme-color" content="#111318" />
+    <title>Review Analyzer</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/">Review Analyzer</a>
+      <span class="status"><span></span> Ready</span>
+    </header>
+
+    <main>
+      <section class="page-heading">
+        <div>
+          <h1>Review dashboard</h1>
+          <p>Analyze customer feedback and track sentiment.</p>
+        </div>
+      </section>
+
+      <section class="stats" aria-label="Review totals">
+        <article class="stat">
+          <span>Total reviews</span>
+          <strong id="total-count">—</strong>
+        </article>
+        <article class="stat">
+          <span>Positive</span>
+          <strong id="positive-count">—</strong>
+        </article>
+        <article class="stat">
+          <span>Neutral</span>
+          <strong id="neutral-count">—</strong>
+        </article>
+        <article class="stat">
+          <span>Negative</span>
+          <strong id="negative-count">—</strong>
+        </article>
+      </section>
+
+      <section class="panel analyzer" id="analyzer">
+        <div class="section-heading">
+          <div>
+            <h2>Analyze a review</h2>
+            <p>Enter a review to get its sentiment, score, and theme.</p>
+          </div>
+        </div>
+
+        <form id="analysis-form">
+          <label for="review-input">Review</label>
+          <textarea
+            id="review-input"
+            name="review"
+            rows="4"
+            maxlength="5000"
+            placeholder="The delivery was late, but the product is great..."
+            required
+          ></textarea>
+          <div class="form-meta">
+            <span id="character-count">0 / 5000</span>
+            <span>Maximum 5,000 characters</span>
+          </div>
+
+          <div class="form-controls">
+            <div class="engine-switch" role="group" aria-label="Analysis method">
+              <button class="engine-button" type="button" data-engine="gemini" aria-pressed="true">
+                Gemini
+              </button>
+              <button class="engine-button" type="button" data-engine="rules" aria-pressed="false">
+                Python rules
+              </button>
+            </div>
+            <button class="submit-button" id="submit-button" type="submit">
+              Analyze review
+            </button>
+          </div>
+          <p class="form-message" id="form-message" role="status" aria-live="polite"></p>
+        </form>
+
+        <section class="result" id="result-card" aria-live="polite" hidden>
+          <div class="result-heading">
+            <h3 id="result-label">—</h3>
+            <span class="badge" id="result-badge">—</span>
+          </div>
+          <div class="result-details">
+            <div><span>Score</span><strong id="result-score">—</strong></div>
+            <div><span>Theme</span><strong id="result-theme">—</strong></div>
+            <div><span>Method</span><strong id="result-source">—</strong></div>
+          </div>
+        </section>
+      </section>
+
+      <section class="panel history" id="history">
+        <div class="section-heading">
+          <div>
+            <h2>Recent reviews</h2>
+            <p>Saved analyses, newest first.</p>
+          </div>
+          <button class="refresh-button" id="refresh-button" type="button">
+            Refresh
+          </button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Review</th>
+                <th scope="col">Sentiment</th>
+                <th scope="col">Score</th>
+                <th scope="col">Theme</th>
+                <th scope="col">Method</th>
+                <th scope="col">Date</th>
+              </tr>
+            </thead>
+            <tbody id="history-rows">
+              <tr><td class="empty-state" colspan="6">Loading saved reviews…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="table-message" id="history-message" role="status"></p>
+      </section>
+
+      <footer>Your reviews are stored locally in SQLite.</footer>
+    </main>
+  </body>
+</html>
