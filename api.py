@@ -5,6 +5,7 @@ from pathlib import Path
 
 from app import analyze_sentiment
 from database import initialize_database, save_analysis, get_analyses
+from document_chunking import answer_question
 
 from gemini_analyzer import analyze_with_gemini
 from google.genai.errors import APIError
@@ -81,6 +82,38 @@ def analyze_batch(request: BatchReviewRequest):
 def get_saved_analyses():
     return {"analyses": get_analyses()}
 
+class AskRequest(BaseModel):
+    question: str = Field(min_length=1)
+
+@app.post("/ask")
+def ask(request: AskRequest):
+    question = request.question.strip()
+    if not question:
+        raise HTTPException(
+            status_code=400,
+            detail="Q cant be empty"
+        )
+    result = answer_question(question)
+
+    if result.get("error"):
+        raise HTTPException(
+            status_code=502,
+            detail="Ans generation failed"
+        )
+    
+    sources = result["sources"]
+    best_similarity = max(
+        (source["similarity"] for source in sources),
+        default=None
+    )
+    return{
+        "answer": result["answer"],
+        "sources": sources,
+        "metadata": {
+            "source_count": len(sources),
+            "best_similarity": best_similarity
+        }
+    }
 
 app.mount(
     "/",
