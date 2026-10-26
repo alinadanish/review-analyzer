@@ -1,7 +1,8 @@
 import faiss
 import numpy as np
-
+import sys
 from sentence_transformers import SentenceTransformer
+from gemini_analyzer import client
 
 documents = [
     {
@@ -179,26 +180,132 @@ def recall_at_k(retrieved_ids, relevant_ids, k=3): #what fraction of the relevan
     )
     return relevant_retrieved / len(relevant_ids)
 
+def answer_question(question):
+    if not question.strip():
+        raise ValueError("Question cant be empty")
+    
+    #ask faiss for chunks most similar to the question
+    retrieved_results = search_faiss(question, top_k=3)
+
+    #if no context, dont make gemini guess 
+    if not retrieved_results:
+        return{
+            "answer": "i dont have enough information to answer this right now",
+            "sources": []   
+        }
+    
+    best_score = max(score for score, _ in retrieved_results)
+
+    MIN_SIMILARITY = 0.05
+    if best_score < MIN_SIMILARITY:
+        return {
+            "answer": "I don't have enough information to answer this right now.",
+            "sources": [],
+        }
+    
+    #build readable context
+    context_parts= []
+    for score, chunk in retrieved_results:
+        context_parts.append(
+            f"[Chunk {chunk['id']} | Department: {chunk['department']}]\n"
+            f"{chunk['text']}"
+        )
+
+    context = "\n\n".join(context_parts)
+
+    prompt = f"""
+Answer the question using only the context below.
+If the context does not contain enough information to answer, say:
+"I don't have enough information in the documents to answer that."
+Do not guess or add facts from outside the context.
+For factual claims, cite the supporting chunk using its ID, like [Chunk 2].
+Context:
+{context}
+Question:
+{question}
+"""
+    try:
+        response = client.models.generate_content(
+            model="gemini-flash-lite-latest",
+            contents=prompt
+        )
+    except Exception as exc:
+        print(f"Request failed.")
+        return{
+            "answer": None,
+            "sources": [],
+            "error": "i coudnt generate an answewr, please try later"
+        }
+    
+    if not response.text or not response.text.strip():
+        return {
+            "answer": None,
+            "sources": [],
+            "error": "Gemini returned an empty response. Please try again later.",
+        }
+    
+    sources = [
+        {
+            "chunk_id": chunk["id"],
+            "department": chunk["department"],
+            "similarity": float(score),
+            "text": chunk["text"],
+        }
+        for score, chunk in retrieved_results
+    ]
+    return{
+        "answer": response.text.strip(),
+        "sources": sources
+    }
+
 if __name__ == "__main__":
-    for chunk in chunks:
-        print(f"\nID: {chunk['id']} | Department: {chunk['department']}")
-        print(chunk["text"])
+    while True:
+        question = input("\nAsk a question (or type 'quit' to exit): ").strip()
 
-    for test_case in test_cases:
-        results = search_faiss(test_case["query"], top_k=3)
-        retrieved_ids = [chunk["id"] for score, chunk in results]
-        relevant_ids = test_case["relevant_ids"]
+        if question.lower() in {"quit", "exit"}:
+            print("Goodbye!")
+            break
 
-        precision = precision_at_k(retrieved_ids, relevant_ids, k=3)
-        recall = recall_at_k(retrieved_ids, relevant_ids, k=3)
+        if not question: 
+            print("enter a question")
+            continue
+    
+        result = answer_question(question)
 
-        print(f"\nQuery: {test_case['query']}")
-        print(f"Retrieved chunk IDs: {retrieved_ids}")
-        print(f"Relevant chunk IDs:  {sorted(relevant_ids)}")
-        print(f"Precision@3: {precision:.2f}")
-        print(f"Recall@3:    {recall:.2f}")
+        if result.get("error"):
+            print(f"\n{result['error']}")
+            continue
 
+        print(f"\nAnswer: {result['answer']}")
+        print("Sources:")
 
+        for source in result["sources"]:
+            print(
+                f"- Chunk {source['chunk_id']} "
+                f"({source['department']}), "
+                f"similarity {source['similarity']:.3f}"
+            )
+            
+    #----FOR FAISSS
+    # for chunk in chunks:
+    #     print(f"\nID: {chunk['id']} | Department: {chunk['department']}")
+    #     print(chunk["text"])
+
+    # for test_case in test_cases:
+    #     results = search_faiss(test_case["query"], top_k=3)
+    #     retrieved_ids = [chunk["id"] for score, chunk in results]
+    #     relevant_ids = test_case["relevant_ids"]
+
+    #     precision = precision_at_k(retrieved_ids, relevant_ids, k=3)
+    #     recall = recall_at_k(retrieved_ids, relevant_ids, k=3)
+
+    #     print(f"\nQuery: {test_case['query']}")
+    #     print(f"Retrieved chunk IDs: {retrieved_ids}")
+    #     print(f"Relevant chunk IDs:  {sorted(relevant_ids)}")
+    #     print(f"Precision@3: {precision:.2f}")
+    #     print(f"Recall@3:    {recall:.2f}")
+
+    #-----FOR DOC-CHUNKING
     # user_query = input("What do you want to search for? ")
     # requested_department = input("Which department? ")
 
