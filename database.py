@@ -19,6 +19,16 @@ def initialize_database():
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_name TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
 
 def save_analysis(review, result, source):
     created_at = datetime.now(timezone.utc).isoformat()
@@ -48,6 +58,33 @@ def get_analyses():
             """
             SELECT id, review, label, score, theme, source, created_at
             FROM analyses
+            ORDER BY id DESC
+            """
+        ).fetchall()
+
+        return [dict(row) for row in rows]
+    
+def save_document(file_name, file_path):
+    created_at = datetime.now(timezone.utc).isoformat()
+
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO documents (file_name, file_path, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (file_name, file_path, created_at)
+        )
+
+        return cursor.lastrowid
+    
+def get_documents():
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            """
+            SELECT id, file_name, file_path, created_at
+            FROM documents
             ORDER BY id DESC
             """
         ).fetchall()

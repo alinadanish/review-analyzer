@@ -3,6 +3,9 @@ import numpy as np
 import sys
 from sentence_transformers import SentenceTransformer
 from gemini_analyzer import client
+from io import BytesIO
+from threading import RLock
+from pypdf import PdfReader
 
 documents = [
     {
@@ -84,7 +87,60 @@ def split_into_chunks(text, chunk_size=35, overlap=10):
 
     return chunks
 
+def add_pdf_document(filename: str, pdf_bytes: bytes) -> dict:
+    global chunk_embeddings
+
+    reader = PdfReader(BytesIO(pdf_bytes))
+
+    if reader.is_encrypted:
+        raise ValueError("Encrypted PDFs are not supported.")
+
+    new_chunks = []
+
+    # Split each page separately so the page citation stays accurate.
+    for page_number, page in enumerate(reader.pages, start=1):
+        page_text = (page.extract_text() or "").strip()
+
+        for text in split_into_chunks(page_text):
+            new_chunks.append({
+                "text": text,
+                "department": "Uploaded PDF",
+                "filename": filename,
+                "page_number": page_number,
+            })
+
+    if not new_chunks:
+        raise ValueError("The PDF contains no extractable text.")
+
+    new_embeddings = model.encode(
+        [chunk["text"] for chunk in new_chunks],
+        normalize_embeddings=True,
+    )
+    new_embeddings = np.asarray(new_embeddings, dtype=np.float32)
+
+    with _index_lock:
+        first_chunk_id = len(chunks)
+        indexed_chunks = [
+            {"id": first_chunk_id + offset, **chunk}
+            for offset, chunk in enumerate(new_chunks)
+        ]
+        updated_embeddings = np.concatenate(
+            (chunk_embeddings, new_embeddings),
+            axis=0,
+        )
+
+        faiss_index.add(new_embeddings)
+        chunks.extend(indexed_chunks)
+        chunk_embeddings = updated_embeddings
+
+    return {
+        "filename": filename,
+        "page_count": len(reader.pages),
+        "chunk_count": len(indexed_chunks),
+    }
+    
 chunks = []
+
 for source_document in documents:
     document_chunks = split_into_chunks(source_document["text"])
     for chunk_text in document_chunks:
@@ -110,6 +166,7 @@ chunk_embeddings = np.asarray(chunk_embeddings, dtype=np.float32)
 embedding_size = chunk_embeddings.shape[1]
 faiss_index = faiss.IndexFlatIP(embedding_size)
 faiss_index.add(chunk_embeddings)
+_index_lock = RLock()
 
 def search_faiss(query, department=None, top_k=3):
     if not query.strip():
@@ -126,16 +183,17 @@ def search_faiss(query, department=None, top_k=3):
     scores, indexes = faiss_index.search(query_embedding, len(chunks))
     ranked_results = []
 
-    for score, index in zip(scores[0], indexes[0]):
-        if index == -1:
-            continue
+    with _index_lock:
+        for score, index in zip(scores[0], indexes[0]):
+            if index == -1:
+                continue
 
-        chunk = chunks[index]
+            chunk = chunks[index]
 
-        if department is None or (
-            chunk["department"].casefold() == department.strip().casefold()
-        ):
-            ranked_results.append((float(score), chunk))
+            if department is None or (
+                chunk["department"].casefold() == department.strip().casefold()
+            ):
+                ranked_results.append((float(score), chunk))
 
     return ranked_results[:top_k]
 
@@ -206,6 +264,13 @@ def answer_question(question):
     #build readable context
     context_parts= []
     for score, chunk in retrieved_results:
+        source_details = ""
+        if "filename" in chunk:
+            source_details = (
+                f" | File: {chunk['filename']} | Page: {chunk['page_number']}"
+            )
+            
+    for score, chunk in retrieved_results:
         context_parts.append(
             f"[Chunk {chunk['id']} | Department: {chunk['department']}]\n"
             f"{chunk['text']}"
@@ -244,15 +309,21 @@ Question:
             "error": "Gemini returned an empty response. Please try again later.",
         }
     
-    sources = [
-        {
+    sources = []
+    for score, chunk in retrieved_results:
+        source = {
             "chunk_id": chunk["id"],
             "department": chunk["department"],
             "similarity": float(score),
             "text": chunk["text"],
         }
-        for score, chunk in retrieved_results
-    ]
+
+        if "filename" in chunk:
+            source["filename"] = chunk["filename"]
+            source["page_number"] = chunk["page_number"]
+
+        sources.append(source)
+        
     return{
         "answer": response.text.strip(),
         "sources": sources

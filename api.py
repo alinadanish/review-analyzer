@@ -1,17 +1,37 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, File, UploadFile
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from pathlib import Path
+from uuid import uuid4
+
+from pypdf.errors import PdfReadError
+from starlette.concurrency import run_in_threadpool
 
 from app import analyze_sentiment
-from database import initialize_database, save_analysis, get_analyses
-from document_chunking import answer_question
+from database import initialize_database, save_analysis, get_analyses, save_document, get_documents
+from document_chunking import answer_question, add_pdf_document
 
 from gemini_analyzer import analyze_with_gemini
 from google.genai.errors import APIError
 
 app = FastAPI()
+UPLOAD_DIR = Path(__file__).with_name("saved_pdfs")
 initialize_database()
+
+@app.on_event("startup")
+def reload_uploaded_documents():
+    for document in get_documents():
+        pdf_path = Path(document["file_path"])
+        
+        if not pdf_path.is_file():
+            raise RuntimeError(
+                f"Saved pdf is missing: {document['file_name']}"
+            )
+            
+        add_pdf_document(
+            document["file_name"],
+            pdf_path.read_bytes()
+        )
 
 class ReviewRequest(BaseModel):
     review: str
@@ -115,6 +135,49 @@ def ask(request: AskRequest):
         }
     }
 
+@app.post("/documents/upload", status_code=201)
+async def upload_document(file: UploadFile = File(...)):
+    original_filename = Path(file.filename or "").name
+
+    if not original_filename or Path(original_filename).suffix.casefold() != ".pdf":
+        raise HTTPException(
+            status_code=415,
+            detail="Upload a PDF file.",
+        )
+
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    saved_path = UPLOAD_DIR / f"{uuid4().hex}.pdf"
+    
+    try:
+        pdf_bytes = await file.read()
+        saved_path.write_bytes(pdf_bytes)
+        result = await run_in_threadpool(
+            add_pdf_document,
+            original_filename,
+            pdf_bytes,
+        )
+        save_document(original_filename, str(saved_path))
+        
+    except PdfReadError as error:
+        saved_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=400,
+            detail="The uploaded file is not a readable PDF.",
+        ) from error
+    except ValueError as error:
+        saved_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=422,
+            detail=str(error),
+        ) from error
+    finally:
+        await file.close()
+
+    return {
+        "message": "PDF indexed successfully.",
+        **result,
+    }
+        
 app.mount(
     "/",
     StaticFiles(directory=Path(__file__).with_name("static"), html=True),
