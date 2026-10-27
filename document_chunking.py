@@ -6,6 +6,9 @@ from gemini_analyzer import client
 from io import BytesIO
 from threading import RLock
 from pypdf import PdfReader
+import time
+import json 
+import logging
 
 documents = [
     {
@@ -65,6 +68,11 @@ test_cases = [
         "relevant_ids": {6, 7},
     },
 ]
+
+INPUT_USD_PER_MILLION_TOKENS = 0.0  # Replace with the model's current input rate
+OUTPUT_USD_PER_MILLION_TOKENS = 0.0  # Replace with the model's current output rate
+
+logger = logging.getLogger(__name__)
 
 def split_into_chunks(text, chunk_size=35, overlap=10):
     if chunk_size < 1:
@@ -241,15 +249,30 @@ def recall_at_k(retrieved_ids, relevant_ids, k=3): #what fraction of the relevan
 def answer_question(question):
     if not question.strip():
         raise ValueError("Question cant be empty")
-    
-    #ask faiss for chunks most similar to the question
-    retrieved_results = search_faiss(question, top_k=3)
 
+    #ask faiss for chunks most similar to the question
+    retrieval_started = time.perf_counter()
+    retrieved_results = search_faiss(question, top_k=3)
+    retrieval_ms = (time.perf_counter() - retrieval_started) * 1000
+    
+    logger.info(
+        "%s",
+        json.dumps({
+            "event": "retrieval_completed",
+            "retrieval_ms": round(retrieval_ms, 2),
+            "retrieved_count": len(retrieved_results),
+        }),
+    )
+    
     #if no context, dont make gemini guess 
     if not retrieved_results:
-        return{
+        return {
             "answer": "i dont have enough information to answer this right now",
-            "sources": []   
+            "sources": [],
+            "metadata": {
+                "retrieval_ms": retrieval_ms,
+                "llm_ms": None,
+            },
         }
     
     best_score = max(score for score, _ in retrieved_results)
@@ -259,6 +282,10 @@ def answer_question(question):
         return {
             "answer": "I don't have enough information to answer this right now.",
             "sources": [],
+            "metadata": {
+                "retrieval_ms": retrieval_ms,
+                "llm_ms": None
+            }
         }
     
     #build readable context
@@ -289,25 +316,76 @@ Context:
 Question:
 {question}
 """
+    
+    llm_started = time.perf_counter()
     try:
         response = client.models.generate_content(
             model="gemini-flash-lite-latest",
             contents=prompt
         )
     except Exception as exc:
-        print(f"Request failed.")
+        llm_ms = (time.perf_counter() - llm_started) * 1000
+        logger.error(
+            "%s",
+            json.dumps({
+                "event": "llm_failed",
+                "llm_ms": round(llm_ms, 2),
+                "error_type": type(exc).__name__,
+            }),
+        )
         return{
             "answer": None,
             "sources": [],
-            "error": "i coudnt generate an answewr, please try later"
+            "error": "i coudnt generate an answewr, please try later",
+            "metadata": {
+                "retrieval_ms": retrieval_ms,
+                "llm_ms": llm_ms
+            }
         }
     
+    llm_ms = (time.perf_counter() - llm_started) * 1000
     if not response.text or not response.text.strip():
         return {
             "answer": None,
             "sources": [],
             "error": "Gemini returned an empty response. Please try again later.",
+            "metadata": {
+                "retrieval_ms": retrieval_ms,
+                "llm_ms": llm_ms
+            }
         }
+    
+    
+    usage = getattr(response, "usage_metadata", None)
+
+    input_tokens = getattr(usage, "prompt_token_count", None)
+    output_tokens = getattr(usage, "candidates_token_count", None)
+    total_tokens = getattr(usage, "total_token_count", None) 
+    
+    estimated_cost_usd = None
+    if input_tokens is not None and output_tokens is not None:
+        estimated_cost_usd = (
+            input_tokens * INPUT_USD_PER_MILLION_TOKENS
+            + output_tokens * OUTPUT_USD_PER_MILLION_TOKENS
+        ) / 1_000_000
+        
+    logger.info(
+        "%s",
+        json.dumps({
+            "event": "ask_completed",
+            "retrieval_ms": round(retrieval_ms, 2),
+            "llm_ms": round(llm_ms, 2),
+            "retrieved_count": len(retrieved_results),
+            "slower_stage": (
+                "retrieval" if retrieval_ms > llm_ms else "llm"
+                
+            ),
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "estimated_cost_usd": estimated_cost_usd,
+        }),
+    )
     
     sources = []
     for score, chunk in retrieved_results:
@@ -322,11 +400,18 @@ Question:
             source["filename"] = chunk["filename"]
             source["page_number"] = chunk["page_number"]
 
-        sources.append(source)
-        
-    return{
+        sources.append(source) 
+
+    return {
         "answer": response.text.strip(),
-        "sources": sources
+        "sources": sources,
+        "metadata": {
+            "retrieval_ms": retrieval_ms,
+            "llm_ms": llm_ms,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+        },
     }
 
 if __name__ == "__main__":

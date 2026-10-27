@@ -13,7 +13,12 @@ from document_chunking import answer_question, add_pdf_document
 
 from gemini_analyzer import analyze_with_gemini
 from google.genai.errors import APIError
+import logging
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s"
+)
 app = FastAPI()
 UPLOAD_DIR = Path(__file__).with_name("saved_pdfs")
 initialize_database()
@@ -131,7 +136,8 @@ def ask(request: AskRequest):
         "sources": sources,
         "metadata": {
             "source_count": len(sources),
-            "best_similarity": best_similarity
+            "best_similarity": best_similarity,
+            **result.get("metadata", {})
         }
     }
 
