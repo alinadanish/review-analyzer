@@ -25,10 +25,23 @@ def initialize_database():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 file_name TEXT NOT NULL,
                 file_path TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                owner_id TEXT NOT NULL
             )
-            """
+            """      
         )
+    
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(documents)")
+        }
+
+        if "owner_id" not in columns:
+            connection.execute("ALTER TABLE documents ADD COLUMN owner_id TEXT")
+            connection.execute(
+                "UPDATE documents SET owner_id = ? WHERE owner_id IS NULL",
+                ("alice",),
+            )
 
 def save_analysis(review, result, source):
     created_at = datetime.now(timezone.utc).isoformat()
@@ -64,16 +77,16 @@ def get_analyses():
 
         return [dict(row) for row in rows]
     
-def save_document(file_name, file_path):
+def save_document(file_name, file_path, owner_id):
     created_at = datetime.now(timezone.utc).isoformat()
 
     with sqlite3.connect(DATABASE_PATH) as connection:
         cursor = connection.execute(
             """
-            INSERT INTO documents (file_name, file_path, created_at)
-            VALUES (?, ?, ?)
+            INSERT INTO documents (file_name, file_path, created_at, owner_id)
+            VALUES (?, ?, ?, ?)
             """,
-            (file_name, file_path, created_at)
+            (file_name, file_path, created_at, owner_id)
         )
 
         return cursor.lastrowid
@@ -83,7 +96,7 @@ def get_documents():
         connection.row_factory = sqlite3.Row
         rows = connection.execute(
             """
-            SELECT id, file_name, file_path, created_at
+            SELECT id, file_name, file_path, created_at, owner_id
             FROM documents
             ORDER BY id DESC
             """
