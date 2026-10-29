@@ -13,6 +13,7 @@ import hashlib
 import pymupdf
 from google.genai import types
 from pathlib import Path
+from docx import Document
 
 documents = [
     {
@@ -76,6 +77,8 @@ test_cases = [
 INPUT_USD_PER_MILLION_TOKENS = 0.0  # Replace with the model's current input rate
 OUTPUT_USD_PER_MILLION_TOKENS = 0.0  # Replace with the model's current output rate
 
+SUPPORTED_DOCUMENT_EXTENSIONS = {".pdf", ".txt", ".md", ".markdown", ".docx"}
+
 logger = logging.getLogger(__name__)
 
 def split_into_chunks(text, chunk_size=55, overlap=10):
@@ -104,7 +107,6 @@ PAGE_DESCRIPTION_DIR = Path(__file__).with_name(".pdf_page_descriptions")
 vision_rate_limited = False
 indexed_pdf_documents: set[tuple[str, str]] = set()
 
-
 def get_cached_page_description(pdf_hash: str, page_number: int) -> str:
     cache_key = (pdf_hash, page_number)
     if cache_key in page_description_cache:
@@ -118,13 +120,11 @@ def get_cached_page_description(pdf_hash: str, page_number: int) -> str:
             return description
     return ""
 
-
 def save_cached_page_description(pdf_hash: str, page_number: int, description: str) -> None:
     PAGE_DESCRIPTION_DIR.mkdir(parents=True, exist_ok=True)
     cache_path = PAGE_DESCRIPTION_DIR / f"{pdf_hash}_page_{page_number}.txt"
     cache_path.write_text(description, encoding="utf-8")
     page_description_cache[(pdf_hash, page_number)] = description
-
 
 def describe_pdf_page(pdf_bytes: bytes, page_number: int, page_text: str, filename: str) -> str:
     global vision_rate_limited
@@ -194,7 +194,128 @@ Rules:
         )
     return description
 
+def extract_text_file(file_bytes: bytes, filename: str) -> str:
+    try: 
+        text = file_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise ValueError(
+            f"{filename} is not readable UTF-8 text document"
+        ) from error
+        
+    if "\x00" in text:
+        raise ValueError(f"{filename} appears to be binary rather than text")
+    
+    text = text.strip()
+    if not text:
+        raise ValueError(f"{filename} contians no usabke text")
+    
+    return text
+    
+def extract_docx_file(file_bytes: bytes, filename: str) -> str:
+    parts = []
+    
+    try:
+        document = Document(BytesIO(file_bytes))
+    except Exception as error:
+        raise ValueError(
+            f"{filename} is not a readble DOCX document."
+        ) from error
+    
+    for paragraph in document.paragraphs:
+        paragraph_text = paragraph.text.strip()
+        if paragraph_text:
+            parts.append(paragraph_text)
+    for table_number, table in enumerate(document.tables, start=1):
+        table_rows = []
 
+        for row in table.rows:
+            cells = [
+                cell.text.strip().replace("\n", " ")
+                for cell in row.cells
+            ]
+            cells = [cell for cell in cells if cell]
+
+            if cells:
+                table_rows.append(" | ".join(cells))
+
+        if table_rows:
+            parts.append(
+                f"Table {table_number}:\n" + "\n".join(table_rows)
+            )
+
+    text = "\n\n".join(parts).strip()
+
+    if not text:
+        raise ValueError(
+            f"{filename} contains no extractable text."
+        )
+
+    return text
+    
+def add_text_document(filename: str, file_bytes: bytes, owner_id: str) -> dict:
+    global chunk_embeddings
+
+    extension = Path(filename).suffix.casefold()
+
+    if extension == ".docx":
+        extracted_text = extract_docx_file(file_bytes, filename)
+        department = "Word document"
+    elif extension in {".txt", ".md", ".markdown"}:
+        extracted_text = extract_text_file(file_bytes, filename)
+        department = "Text document"
+    else:
+        raise ValueError(
+            f"Unsupported document type: {extension or 'missing extension'}"
+        )
+
+    new_chunks = []
+
+    for text in split_into_chunks(extracted_text, chunk_size=55, overlap=10):
+        new_chunks.append({
+            "text": text,
+            "department": department,
+            "filename": filename,
+            "owner_id": owner_id,
+        })
+
+    new_embeddings = model.encode(
+        [chunk["text"] for chunk in new_chunks],
+        normalize_embeddings=True,
+    )
+    new_embeddings = np.asarray(new_embeddings, dtype=np.float32)
+
+    with _index_lock:
+        first_chunk_id = len(chunks)
+        indexed_chunks = [
+            {"id": first_chunk_id + offset, **chunk}
+            for offset, chunk in enumerate(new_chunks)
+        ]
+
+        chunk_embeddings = np.concatenate(
+            (chunk_embeddings, new_embeddings),
+            axis=0,
+        )
+        faiss_index.add(new_embeddings)
+        chunks.extend(indexed_chunks)
+
+    return {
+        "filename": filename,
+        "chunk_count": len(indexed_chunks),
+    }
+
+def add_document(filename: str, file_bytes: bytes, owner_id: str) -> dict:
+    extension = Path(filename).suffix.casefold()
+
+    if extension == ".pdf":
+        return add_pdf_document(filename, file_bytes, owner_id)
+
+    if extension in SUPPORTED_DOCUMENT_EXTENSIONS:
+        return add_text_document(filename, file_bytes, owner_id)
+
+    raise ValueError(
+        f"Unsupported document type: {extension or 'missing extension'}"
+    )
+        
 def add_pdf_document(filename: str, pdf_bytes: bytes, owner_id: str) -> dict:
     global chunk_embeddings
 
@@ -438,18 +559,19 @@ def answer_question(question, owner_id):
             }
         }
     
-    #build readable context
-    context_parts= []
+    # Build readable context. Text and Word chunks do not have page numbers.
+    context_parts = []
     for score, chunk in retrieved_results:
-        source_details = ""
+        source_details = f"Department: {chunk['department']}"
+
         if "filename" in chunk:
-            source_details = (
-                f" | File: {chunk['filename']} | Page: {chunk['page_number']}"
-            )
-            
-    for score, chunk in retrieved_results:
+            source_details += f" | File: {chunk['filename']}"
+
+        if "page_number" in chunk:
+            source_details += f" | Page: {chunk['page_number']}"
+
         context_parts.append(
-            f"[Chunk {chunk['id']} | Department: {chunk['department']}]\n"
+            f"[Chunk {chunk['id']} | {source_details}]\n"
             f"{chunk['text']}"
         )
 
@@ -553,7 +675,8 @@ Question:
 
         if "filename" in chunk:
             source["filename"] = chunk["filename"]
-            source["page_number"] = chunk["page_number"]
+            if "page_number" in chunk:
+                source["page_number"] = chunk["page_number"]
 
         sources.append(source) 
 

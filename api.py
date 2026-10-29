@@ -9,7 +9,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app import analyze_sentiment
 from database import initialize_database, save_analysis, get_analyses, save_document, get_documents
-from document_chunking import answer_question, add_pdf_document
+from document_chunking import answer_question, add_document
 
 from gemini_analyzer import analyze_with_gemini_async
 from google.genai.errors import APIError
@@ -76,7 +76,7 @@ def reload_uploaded_documents():
                 f"Saved pdf is missing: {document['file_name']}"
             )
             
-        add_pdf_document(
+        add_document(
             document["file_name"],
             pdf_path.read_bytes(),
             document["owner_id"]
@@ -238,21 +238,30 @@ def ask(request: AskRequest, current_user: str = Depends(get_current_user)):
 @app.post("/documents/upload", status_code=201)
 async def upload_document(file: UploadFile = File(...), current_user: str = Depends(get_current_user)):
     original_filename = Path(file.filename or "").name
+    extension = Path(original_filename).suffix.casefold()
 
-    if not original_filename or Path(original_filename).suffix.casefold() != ".pdf":
+    SUPPORTED_EXTENSIONS = {".pdf", ".txt", ".md", ".markdown", ".docx"}
+
+    if not original_filename:
+        raise HTTPException(
+            status_code=400,
+            detail="Filename is required.",
+        )
+
+    if extension not in SUPPORTED_EXTENSIONS:
         raise HTTPException(
             status_code=415,
-            detail="Upload a PDF file.",
+            detail=f"Unsupported document type: {extension or 'missing extension'}",
         )
 
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    saved_path = UPLOAD_DIR / f"{uuid4().hex}.pdf"
+    saved_path = UPLOAD_DIR / f"{uuid4().hex}{extension}"
     
     try:
         pdf_bytes = await file.read()
         saved_path.write_bytes(pdf_bytes)
         result = await run_in_threadpool(
-            add_pdf_document,
+            add_document,
             original_filename,
             pdf_bytes,
             current_user
@@ -275,7 +284,7 @@ async def upload_document(file: UploadFile = File(...), current_user: str = Depe
         await file.close()
 
     return {
-        "message": "PDF indexed successfully.",
+        "message": "Document indexed successfully.",
         **result,
     }
         
